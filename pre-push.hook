@@ -1,0 +1,17 @@
+#!/bin/sh
+
+composer run-script phpstan
+rc=$?
+if [[ $rc != 0 ]] ; then
+	echo "phpstan - push denied. PhpStan found a mistakes in script 'giffer'."
+    exit $rc
+fi
+
+composer run-script phpfixer
+rc=$?
+if [[ $rc != 0 ]] ; then
+	echo "phpfixer - push denied. Script 'giffer' have invalid syntax."
+    exit $rc
+fi
+
+exit 0
