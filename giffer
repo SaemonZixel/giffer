@@ -1,0 +1,297 @@
+#!/usr/bin/env php
+<?php
+
+error_reporting(E_ALL|E_STRICT);
+ini_set('display_errors', 1);
+// function exception_handler($exception) { print_r($exception); }
+// set_exception_handler('exception_handler');
+set_time_limit(300); // 5 min limit
+
+// базовый класс с общим функционалом
+abstract class ImageFile {
+	public $filename;
+	public $width = 0;
+	public $height = 0;
+	public $gd_res = null;
+	public $delay = 0; // задержка фрейма (актуально для animated GIF/APNG)
+
+	function __construct($filename, $delay = 0) {
+		$this->filename = $filename;
+		$this->delay = $delay;
+		
+		// соберём информацию об изображении
+		if (file_exists($filename)) {
+			$img_info = getimagesize($filename);
+			$this->width = $img_info[0];
+			$this->height = $img_info[1];
+		}
+	}
+	
+	// загрузить содержимое изображения в $this->gd_res
+	abstract public function load();
+	
+	// сохранить под новым именем
+	abstract public function saveAs($new_filename, $quality = null);
+	
+	// сохранить изменения (сбросить содержимое gd_res на диск)
+	public function save($quality = null) {
+
+		// изображение небыло загружено, значит нет изменений
+		if (empty($this->gd_res)) return;
+		
+		return $this->saveAs($this->filename, $quality);
+	}
+	
+	// изменить размер
+	public function resize($new_width, $new_height) {
+		
+		// загрузим изображение в gd_res (если ещё не загрузили)
+		$this->load();
+		
+		// подложка результата
+		$dst = imagecreatetruecolor($new_width, $new_height);
+		imagealphablending($dst, true);
+		imagesavealpha($dst, true);
+		$transparent = imagecolorallocatealpha($dst, 255, 255, 255, 127);
+		
+		// ресайзим
+		imagecopyresampled(
+			$dst, $this->gd_res, 
+			0, 0, 0, 0, 
+			$new_width, $new_height, $this->width, $this->height);
+		imagedestroy($this->gd_res);
+		$this->gd_res = $dst;
+		
+		// проставим новые размеры
+		$this->width = $new_width;
+		$this->height = $new_height;
+	}
+	
+	// наложить водяной знак
+	public function put_watermark($watermark) {
+		
+		// загрузим изображения для начала (если не загружены были)
+		$this->load(); 
+		$watermark->load();
+	
+		// накладываем знак
+		imagecopyresampled(
+			$this->gd_res, $watermark->gd_res, 
+			0, 0, 0, 0, 
+			$watermark->width, $watermark->height, $watermark->width, $watermark->height);
+	}
+}
+
+// класс для файла GIF (в том числе animated GIF)
+class ImageFileGIF extends ImageFile {
+	public $frames = [];
+
+	function __construct($filename, $delay = 0) {
+		parent::__construct($filename, $delay);
+		
+		// создадим временную папку для распакованных фреймов
+		$tmp_file_name = tempnam(sys_get_temp_dir(), "");
+		$tmp_dir_name = $tmp_file_name.".d".DIRECTORY_SEPARATOR;
+		mkdir($tmp_dir_name);
+
+		// зарегистрируем функцию удаления мусора
+		register_shutdown_function(function($dir) { 
+			foreach(scandir($dir) as $file) if($file[0] != ".") unlink($dir.$file);
+			rmdir($dir);
+			unlink(str_replace(".d/", "", $dir));
+		}, $tmp_dir_name);
+		
+		// распакуем фреймы
+		$output = shell_exec("convert -verbose -coalesce $filename {$tmp_dir_name}frame.png 2>&1");
+// var_dump($output);
+// passthru("ls -al {$tmp_dir_name}");
+
+		// вытащим список фреймов и задержки анимации
+		$identify_output = shell_exec("identify -format \"%f canvas=%Wx%H size=%wx%h offset=%X%Y %D %Tcs\\n\" $filename");
+		$identify_output = explode("\n", $identify_output);
+		
+		// формируем фреймы
+		foreach(scandir($tmp_dir_name) as $file) if($file[0] != '.') {
+			$delay = intval(preg_replace("~.+?([0-9]+)cs$~", "$1", array_shift($identify_output)));
+			$this->frames[] = new ImageFilePNG($tmp_dir_name.$file, $delay);
+		}
+		
+	}
+	
+	public function load() {
+		if(!empty($this->gd_res)) return;
+		
+		$this->gd_res = imagecreatefromgif($this->filename); 
+		
+		if(! $this->gd_res) throw new Exception("Cant load {$this->filename}!");
+	}
+	
+	public function frame_count() {
+		return count($this->frames);
+	}
+	
+	public function get_frame($frame_no) {
+		return $this->frames[$frame_no];
+	}
+	
+	public function resize_and_put_watermark($width, $height, $wm) {
+		for($frame_no = 0; $frame_no < $this->frame_count(); $frame_no++) {
+			$frame = $this->get_frame($frame_no);
+			$frame->resize($width, $height);
+			if(!empty($wm)) $frame->put_watermark($wm); // может быть не указан
+			$frame->save();
+		}
+	}
+	
+	// сохранить результат под новым именем
+	public function saveAs($new_filename, $quality = null) {
+		
+		// конструируем комманду формирования нового анимированного GIF
+		$convert_cmd = "convert -verbose";
+		foreach($this->frames as $frame)
+			$convert_cmd .= " -dispose previous -delay {$frame->delay} {$frame->filename}";
+		$convert_cmd .= " -coalesce  -layers OptimizeFrame -loop 0 $new_filename 2>&1";
+		
+		$output = []; $exit_code = null;
+// 		echo "exec: $convert_cmd\n";
+		$output = shell_exec($convert_cmd);
+// 		echo $output;
+		
+		return !empty($output);
+	}
+}
+
+// класс для файла PNG
+class ImageFilePNG extends ImageFile {
+
+	public function load() {
+		if(!empty($this->gd_res)) return;
+		
+		$this->gd_res = imagecreatefrompng($this->filename);
+		
+		if(! $this->gd_res) throw new Exception("Cant load {$this->filename}!");
+	}
+	
+	public function saveAs($new_filename, $quality = null) {
+		
+		// загрузим содержимое, если не загрузили
+		if (empty($this->gd_res)) $this->load();
+		
+		// сохраним содержимое под новым именем
+		imagepng($this->gd_res, $new_filename, isset($quality) ? $quality : 9); 
+		
+		// выгрузим
+		imagedestroy($this->gd_res);
+		$this->gd_res = null;
+	}
+}
+
+// приложение пусть тоже будет объектом (для красоты)
+class GifferApp {
+	public $SRC_FILE;
+	public $DEST_FILE;
+	public $width;
+	public $height;
+	public $watermark_file;
+
+	function __construct($argv) {
+		
+		// выведем справку если не указали не одного параметра
+		if (count($argv) == 1) {
+			throw new Exception("Usage: giffer [OPTIONS] SRC_FILE DEST_FILE
+Required parameters:
+  SRC_FILE		source GIF file
+  DEST_FILE		output GIF file
+	
+Options:
+  -w, --width		width of output image (in pixels)
+  -h, --height		height of output image (in pixels)
+  -m, --mark		path to watermark file in PNG format
+");
+		}
+		
+		// иначе разберём параметры
+		for($i = 1; $i < count($argv); $i++) {
+		
+			if($argv[$i] == "-w" or $argv[$i] == "--width") {
+				$this->width = intval($argv[$i+1]);
+				$i++;
+				continue;
+			}
+	
+			if($argv[$i] == "-h" or $argv[$i] == "--height") {
+				$this->height = intval($argv[$i+1]);
+				$i++;
+				continue;
+			}
+	
+			if($argv[$i] == "-m" or $argv[$i] == "--mark") {
+				$this->watermark_file = $argv[$i+1];
+				$i++;
+				continue;
+			}
+			
+			if ($argv[$i][0] == '-')
+				throw new Exception("Unknown parameter {$argv[$i]}!");
+	
+			if (!isset($this->SRC_FILE)) { 
+				$this->SRC_FILE = $argv[$i];
+				continue;
+			}
+			
+			if (!isset($this->DEST_FILE)) {
+				$this->DEST_FILE = $argv[$i];
+				continue;
+			}
+		}
+
+		// исходный и конечный файл обязательно должны быть указаны!
+		if (empty($this->SRC_FILE) or empty($this->DEST_FILE)) {
+			throw new Exception("SRC_FILE or/and DEST_FILE not specified!");
+		}
+		
+		if (file_exists($this->SRC_FILE) == false)
+			throw new Exception("{$this->SRC_FILE} not exists!");
+		
+		if (isset($this->watermark_file) and file_exists($this->watermark_file) == false)
+			throw new Exception("{$this->watermark_file} not exists!");
+		
+		// проверим на существование ImageMagic в системе
+		$output = [];
+		exec("convert", $output);
+		if(! preg_match("~Version: ImageMagick [0-9.]+~", $output[0]))
+			throw new Exception("ImageMagick not installed!");
+	}
+
+	// запустить приложение
+	public function run() {
+	
+		// исходное изображение
+		$src_gif = new ImageFileGIF($this->SRC_FILE);
+
+		// если размеры не задали, то используем исходные
+		$this->width = isset($this->width) ? $this->width : $src_gif->width;
+		$this->height = isset($this->height) ? $this->height : $src_gif->height;
+
+		// водяной знак
+		$wm = new ImageFilePNG($this->watermark_file);
+
+		// ресайзим и сохраняем результат
+		$src_gif->resize_and_put_watermark($this->width, $this->height, $wm);
+		$src_gif->saveAs($this->DEST_FILE);
+	}
+}
+
+// запустим приложение собственно
+try {
+	$app = new GifferApp($_SERVER["argv"]);
+// print_r($app);
+	$app->run();
+}
+catch(Exception $ex) {
+	echo $ex->getMessage();
+	echo "\n";
+	exit(1);
+}
+
+exit(0);
