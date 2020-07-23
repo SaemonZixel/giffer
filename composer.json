@@ -1,0 +1,22 @@
+{
+    "name": "SaemonZixel/giffer",
+    "type": "utility",
+    "description": "Console php utility for resize and watermarking animated GIF files.",
+    "homepage": "https://github.com/SaemonZixel/giffer",
+    "license": "BSD",
+    "authors": [
+		{"name": "Saemon Zixel", "email": "saemonzixel@gmail.com"}
+    ],
+    "require": {
+        "php": ">=5.3",
+        "ext-gd": "*"
+    },
+	"require-dev": {
+		"phpstan/phpstan": "^0.12.33",
+        "friendsofphp/php-cs-fixer": "^2.16"
+	},
+	"scripts": {
+		"phpstan": "phpstan analyse giffer",
+		"phpfixer": "php-cs-fixer fix giffer --rules=@PSR2"
+	}
+}
