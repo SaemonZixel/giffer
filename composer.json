@@ -5,7 +5,10 @@
     "homepage": "https://github.com/SaemonZixel/giffer",
     "license": "BSD",
     "authors": [
-		{"name": "Saemon Zixel", "email": "saemonzixel@gmail.com"}
+		{
+			"name": "Saemon Zixel", 
+			"email": "saemonzixel@gmail.com"
+		}
     ],
     "require": {
         "php": ">=5.3",
