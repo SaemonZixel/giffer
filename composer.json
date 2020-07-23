@@ -20,6 +20,6 @@
 	},
 	"scripts": {
 		"phpstan": "phpstan analyse giffer",
-		"phpfixer": "php-cs-fixer fix giffer --rules=@PSR2"
+		"phpfixer": "php-cs-fixer fix giffer -v --dry-run --stop-on-violation --rules=@PSR2"
 	}
 }
